@@ -336,14 +336,14 @@ def prepare_wy_repr_bwd_kv_npu(
             b_v = tl.load(p_v, boundary_check=(0, 1))
             b_du = tl.load(p_du, boundary_check=(0, 1))
             b_vb = (b_v.to(tl.float32) * b_b[:, None]).to(b_v.dtype)
-            b_du_c = b_du + 0.0
             b_A_c = b_A.to(b_du.dtype) + 0.0
-            b_dA = tl.dot(b_du, tl.trans(b_vb), acc=b_dA, allow_tf32=False)
-            b_dvb = tl.dot(b_A_c, b_du_c, allow_tf32=False).to(tl.float32)
+            b_dvb = tl.dot(b_A_c, b_du, allow_tf32=False).to(tl.float32)
             b_v_f = b_v.to(tl.float32)
             b_dv = b_dvb * b_b[:, None]
             b_db += tl.sum(b_dvb * b_v_f, 1)
             tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
+            b_du_fresh = tl.load(p_du, boundary_check=(0, 1))
+            b_dA = tl.dot(b_du_fresh, tl.trans(b_vb), acc=b_dA, allow_tf32=False)
 
         tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0,))
@@ -572,15 +572,17 @@ def prepare_wy_repr_bwd_finalize_a2_dg_npu(
     else:
         p_dg = tl.make_block_ptr(dg + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
 
-    b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
     b_A2 = tl.zeros([BT, BT], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
         p_k = tl.make_block_ptr(
             k + (bos * H + i_h // (HV // H)) * K, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
         )
-        b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
+        # The FP32 Cube dot can produce NaNs on Triton Ascend 3.6.
+        b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float16)
         b_k_c = b_k + 0.0
-        b_A2 = tl.dot(b_k, tl.trans(b_k_c), b_A2, allow_tf32=False)
+        b_A2 = tl.dot(b_k, tl.trans(b_k_c), acc=b_A2, allow_tf32=False)
+    # Load beta after the Cube dots so it does not stay live across them.
+    b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
     b_A2 *= b_b[:, None]
     b_dA = tl.load(p_dA, boundary_check=(0, 1)).to(tl.float32)
     b_prod = b_dA * b_A2

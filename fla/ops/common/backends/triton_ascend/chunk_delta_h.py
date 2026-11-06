@@ -1178,8 +1178,13 @@ def chunk_gated_delta_rule_bwd_dhu_npu(
     )
     gate_inline = g is not None and not use_g_precomp
     BK, BV = _select_bwd_dhu_tiles(K=K, V=V, state_v_first=state_v_first, gate_inline=gate_inline)
+    # The 950DT UB estimator over-selects BV=256 for K=128, V>=256 and overflows at compile time.
+    if not state_v_first and K >= 128 and V >= 256:
+        BV = min(BV, 128)
+    compile_opts = {"enable_dynamic_cv_pipeline": False} if state_v_first and gk is None else {}
     _launch_core_grid(
         kernel=chunk_gated_delta_rule_h_bwd_kernel,
+        **compile_opts,
         task_num=N * HV,
         kernel_kwargs={
             "q": q,
