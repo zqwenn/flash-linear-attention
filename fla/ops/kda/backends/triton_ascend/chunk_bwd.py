@@ -278,7 +278,6 @@ def chunk_kda_bwd_kernel_wy_v_part_npu(
 
             p_A = tl.make_block_ptr(A_ptr, (BT, T), (1, a_stride_t), (0, i_t * BT), (BT, BT), (0, 1))
             p_beta = tl.make_block_ptr(beta_ptr, (T,), (beta_stride,), (i_t * BT,), (BT,), (0,))
-            b_A = tl.load(p_A, boundary_check=(0, 1))
             b_beta = tl.load(p_beta, boundary_check=(0,))
 
             b_dA = tl.zeros([BT, BT], dtype=tl.float32)
@@ -288,13 +287,14 @@ def chunk_kda_bwd_kernel_wy_v_part_npu(
                 p_v = tl.make_block_ptr(v_ptr, (T, V), (v_stride_t, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
                 b_dv = tl.load(p_dv, boundary_check=(0, 1))
                 b_v = tl.load(p_v, boundary_check=(0, 1))
-                b_dA = tl.dot(b_dv, tl.trans(b_v), b_dA, allow_tf32=False)
-                # Ascend tl.dot clobbers lhs; copy A before every V-slab use.
-                b_A_c = b_A + 0.0
+                # Reload immutable operands so consecutive Cube operations own separate buffers.
+                b_A_c = tl.load(p_A, boundary_check=(0, 1), volatile=True)
                 b_dvb = tl.dot(b_A_c, b_dv, allow_tf32=False)
                 b_db += tl.sum(b_dvb * b_v, 1)
                 p_dv2 = tl.make_block_ptr(dv2_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
                 tl.store(p_dv2, (b_dvb * b_beta[:, None]).to(p_dv2.dtype.element_ty), boundary_check=(0, 1))
+                b_dv_fresh = tl.load(p_dv, boundary_check=(0, 1), volatile=True)
+                b_dA = tl.dot(b_dv_fresh, tl.trans(b_v), b_dA, allow_tf32=False)
 
             p_dA = tl.make_block_ptr(dA_ptr, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
             p_db = tl.make_block_ptr(db_ptr, (T,), (HV,), (i_t * BT,), (BT,), (0,))
@@ -578,7 +578,6 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
             b_gk_exp = exp2(b_g)
             b_kg = b_k * b_gk_exp
             b_gb = b_gk_exp * b_beta[:, None]
-            # Match CUDA: downcast dw/kg to A.dtype before dA / dkgb GEMMs.
             b_dw = -b_dw.to(b_A.dtype)
             b_kg_a = b_kg.to(b_A.dtype)
             b_dkgb = tl.dot(b_A, b_dw, allow_tf32=False)
@@ -697,9 +696,9 @@ def chunk_kda_bwd_kernel_wy_dA_finalize_npu(
                 m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t[None, :])
 
             b_dA = tl.where(m_A, b_dA * b_beta[None, :], 0)
-            # mid: (mask * dA_acc * beta) @ A. lhs clobbers b_dA; A is rhs then lhs.
             b_mid = tl.dot(b_dA.to(b_A.dtype), b_A, allow_tf32=False)
-            b_fin = tl.dot(b_A, b_mid.to(b_A.dtype), allow_tf32=False)
+            b_A_fresh = tl.load(p_A, boundary_check=(0, 1), volatile=True)
+            b_fin = tl.dot(b_A_fresh, b_mid.to(b_A.dtype), allow_tf32=False)
             b_fin = tl.where(m_A, -b_fin, 0)
 
             if TAIL_MODE == 0:

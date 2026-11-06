@@ -675,6 +675,8 @@ def chunk_gated_delta_rule_fwd_h_npu(
     gk, gk_last_exp = _prepare_fwd_gk_last_exp(gk=gk, B=B, T=T, HV=HV, K=K, BT=BT, cu_seqlens=cu_seqlens)
 
     BK, BV = _select_fwd_h_tiles(K=K, V=V, state_v_first=state_v_first)
+    if cu_seqlens is not None and gk is not None and K >= 256:
+        BV = min(BV, 64)
     oneslab = (
         cu_seqlens is None
         and not state_v_first
