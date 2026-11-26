@@ -34,6 +34,7 @@ from fla.utils.ascend_ub_manager import (
     get_npu_properties,
     max_grid_axis_chunks,
 )
+from fla.utils.hardware import ascend_dynamic_cv_enabled
 
 # prepare_wy_repr_bwd stage-specific UB models
 # finalize_k / a2 keep a conservative 4.5× slab (BK=256 overflows 192KB UB).
@@ -153,8 +154,19 @@ def _launch_wy_kernel(
 
 def launch_wy_core_grid(kernel, *, task_num: int, kernel_kwargs: dict) -> None:
     num_core = min(get_npu_properties()["num_aicore"], max(1, task_num))
-    # disable auto-multi-buffer on this core-grid launch
-    kernel[(num_core,)](task_num=task_num, num_core=num_core, **ascend_compile_kwargs(), **kernel_kwargs)
+    compile_kwargs = ascend_compile_kwargs()
+    bk = kernel_kwargs['BK']
+    large_kv = kernel is prepare_wy_repr_bwd_kv_npu and max(bk, kernel_kwargs['BV']) >= 128
+    large_finalize = kernel is prepare_wy_repr_bwd_finalize_k_npu and (
+        (bk >= 128 and not kernel_kwargs['MASK_T'])
+        or (bk >= 64 and kernel_kwargs['MASK_T'] and kernel_kwargs['K'] == bk)
+    )
+    if kernel_kwargs['BT'] >= 64 and (large_kv or large_finalize) and ascend_dynamic_cv_enabled(compile_kwargs):
+        if large_kv:
+            kernel_kwargs = {**kernel_kwargs, 'BV': min(kernel_kwargs['BV'], 128)}
+        # Bound Vector-local copies of large WY slabs while retaining cross-core pipelining.
+        compile_kwargs['buf_slot_num_of_veccore'] = 1
+    kernel[(num_core,)](task_num=task_num, num_core=num_core, **compile_kwargs, **kernel_kwargs)
 
 
 def _varlen_chunk_passes(cu_seqlens, chunk_indices, chunk_size):

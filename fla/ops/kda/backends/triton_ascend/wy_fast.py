@@ -30,6 +30,7 @@ from fla.ops.utils.index import ensure_cu_seqlens_cpu, partition_chunk_indices_f
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties
+from fla.utils.hardware import ascend_dynamic_cv_enabled
 
 # recompute_w_u_fwd: peak UB is max(u-slab, w-slab), not sum — tile BK/BV independently.
 # u-slab: b_A[BT,BT] + b_v/b_vb/b_u[BT,BV]  (~3.5× BT×BV + BT×BT)
@@ -51,6 +52,9 @@ def add_token_rows(ptr, row_base, rows, stride, SPLIT: tl.constexpr):
 
 def _launch_wy_core_grid(kernel, *, task_num: int, kernel_kwargs: dict, full_chunks: bool = False) -> None:
     num_core = get_npu_properties()["num_aicore"]
+    if (kernel_kwargs['BT'] >= 64 and kernel_kwargs['BK'] > 64
+            and ascend_dynamic_cv_enabled()):
+        kernel_kwargs = {**kernel_kwargs, 'BK': 64}
     cu = kernel_kwargs['cu_seqlens']
     if full_chunks:
         kwargs = {**kernel_kwargs, 'MASK_DMA': need_kv_dma_mask(
